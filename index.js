@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const express = require("express");
 
 // Replace with your actual values
-const BOT_TOKEN = "7929567285:AAGd9W_5uYNZdRVBVPm07swe7lx74iyDISA";
+const BOT_TOKEN = "7929567285:AAG-vhnHe3o3hUAnYdlGXEk5eMUmoE1rHfs";
 const MONGODB_URI = "mongodb+srv://gdfnj66:qonbOLu0Qxs0qLOw@cluster0.cr5ef04.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
 const CHANNEL_ID = -1002767614449;
 
