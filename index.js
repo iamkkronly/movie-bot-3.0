@@ -1,93 +1,90 @@
-const express = require('express');
-const { Telegraf } = require('telegraf');
-const mongoose = require('mongoose');
+import { Telegraf } from 'telegraf';
+import mongoose from 'mongoose';
 
-// === Config ===
+// ====== Configuration ======
 const BOT_TOKEN = '7929567285:AAEZ6jjlShWNF2Uf16SI8tqA-R501jEIbmc';
 const MONGO_URI = 'mongodb+srv://gdfnj66:qonbOLu0Qxs0qLOw@cluster0.cr5ef04.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
-const SOURCE_CHANNEL = -1002767614449;
+const CHANNEL_ID = -1002767614449;
 
-// === Connect to MongoDB ===
-mongoose.connect(MONGO_URI, {
+// ====== MongoDB Setup ======
+await mongoose.connect(MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
-}).then(() => console.log('✅ MongoDB connected'))
-  .catch(err => console.error('❌ MongoDB error:', err));
+});
 
-// === Movie Schema ===
 const movieSchema = new mongoose.Schema({
-  file_id: String,
+  message_id: Number,
   title: String,
   caption: String,
-  search_key: String,
+  full_text: String,
 });
+
 const Movie = mongoose.model('Movie', movieSchema);
 
-// === Telegram Bot Setup ===
+// ====== Bot Setup ======
 const bot = new Telegraf(BOT_TOKEN);
 
-// === Normalize Function ===
-const normalize = (text) =>
-  text.toLowerCase().replace(/[\s_]+/g, '').replace(/[^a-z0-9]/gi, '');
+// ====== Normalize Function ======
+function normalize(text) {
+  return text.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
 
-// === Index New Channel Posts ===
+// ====== Indexing Channel Messages ======
 bot.on('channel_post', async (ctx) => {
+  const msg = ctx.channelPost;
+  const file = msg.document || msg.video;
+
+  if (!file) return;
+
+  const title = file.file_name || msg.caption?.split('\n')[0] || 'Untitled';
+  const caption = msg.caption || '';
+  const full_text = normalize(title + ' ' + caption);
+
   try {
-    const msg = ctx.channelPost;
-    const file = msg.document || msg.video;
-    if (!file) return;
-
-    const title = file.file_name || msg.caption?.split('\n')[0] || 'Untitled';
-    const caption = msg.caption || '';
-    const search_key = normalize(title);
-
-    const exists = await Movie.findOne({ file_id: file.file_id });
-    if (!exists) {
-      await Movie.create({
-        file_id: file.file_id,
-        title,
-        caption,
-        search_key,
-      });
-      console.log(`📥 Indexed: ${title}`);
-    }
+    await Movie.create({
+      message_id: msg.message_id,
+      title,
+      caption,
+      full_text,
+    });
+    console.log(`📥 Indexed: ${title}`);
   } catch (err) {
-    console.error('❌ Indexing error:', err.message);
+    if (err.code !== 11000) {
+      console.error('❌ Error indexing:', err.message);
+    }
   }
 });
 
-// === Respond to User Messages ===
+// ====== Handle User Movie Search ======
 bot.on('text', async (ctx) => {
-  try {
-    const query = normalize(ctx.message.text);
-    const movie = await Movie.findOne({ search_key: query });
+  const query = normalize(ctx.message.text);
 
-    if (movie) {
-      await ctx.telegram.sendDocument(ctx.chat.id, movie.file_id, {
-        caption: movie.caption,
-        parse_mode: 'HTML',
-      });
-    } else {
-      await ctx.reply('❌ Movie not found. Try a different name.');
-    }
+  let movie = await Movie.findOne({
+    full_text: { $regex: query, $options: 'i' },
+  });
+
+  if (!movie) {
+    return ctx.reply('❌ Movie not found.');
+  }
+
+  try {
+    await ctx.telegram.copyMessage(
+      ctx.chat.id,
+      CHANNEL_ID,
+      movie.message_id,
+      { caption: movie.caption }
+    );
   } catch (err) {
-    console.error('❌ Search error:', err.message);
-    ctx.reply('⚠️ Internal server error.');
+    console.error('❌ Error sending movie:', err.message);
+    ctx.reply('⚠️ Error sending movie file.');
   }
 });
 
-// === Launch the Bot ===
-bot.launch();
-console.log('🤖 Bot started');
-
-// === Express App for Render ===
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.get('/', (req, res) => {
-  res.send('🎬 Telegram Movie Bot is running.');
+// ====== Start Bot ======
+bot.launch().then(() => {
+  console.log('🤖 Bot started');
 });
 
-app.listen(PORT, () => {
-  console.log(`🌐 Server is running on port ${PORT}`);
-});
+// ====== Graceful Shutdown ======
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
