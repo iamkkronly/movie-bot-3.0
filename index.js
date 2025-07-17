@@ -1,128 +1,103 @@
-const { Telegraf, Markup } = require("telegraf");
+const { Telegraf, Markup, session } = require("telegraf");
 const mongoose = require("mongoose");
 const express = require("express");
 
+// Replace with your actual values
 const BOT_TOKEN = "7929567285:AAGd9W_5uYNZdRVBVPm07swe7lx74iyDISA";
-const MONGO_URI = "mongodb+srv://gdfnj66:qonbOLu0Qxs0qLOw@cluster0.cr5ef04.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
+const MONGODB_URI = "mongodb+srv://gdfnj66:qonbOLu0Qxs0qLOw@cluster0.cr5ef04.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
 const CHANNEL_ID = -1002767614449;
 
+// Initialize bot and web server
 const bot = new Telegraf(BOT_TOKEN);
+bot.use(session());
+
 const app = express();
+app.get("/", (_, res) => res.send("Bot is active"));
+app.listen(3000, () => console.log("Web server running on port 3000"));
 
-mongoose.connect(MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => console.log("MongoDB connected."))
-  .catch(err => console.error("Mongo error:", err));
-
-const MovieSchema = new mongoose.Schema({
+// MongoDB model in same file
+const movieSchema = new mongoose.Schema({
   file_id: String,
-  title: String,
   caption: String,
-  file_size: String
+  title: String
 });
-const Movie = mongoose.model("Movie", MovieSchema);
+const Movie = mongoose.model("Movie", movieSchema);
 
-// 🌐 Web service to keep Render alive
-app.get("/", (req, res) => {
-  res.send("Bot is running...");
-});
-app.listen(process.env.PORT || 3000);
+// MongoDB connect
+mongoose.connect(MONGODB_URI).then(() => console.log("Connected to MongoDB"));
 
-// 📥 Auto-index from channel
-bot.on("channel_post", async (ctx) => {
-  const msg = ctx.channelPost;
-  if (!msg.document) return;
+// Index new movie documents from channel posts
+bot.on("message", async (ctx) => {
+  const msg = ctx.message;
+  if (msg.chat.id === CHANNEL_ID && msg.document) {
+    const file_id = msg.document.file_id;
+    const caption = msg.caption || "No caption";
+    const title = caption.toLowerCase().replace(/\s+/g, "_");
 
-  const title = msg.caption || msg.document.file_name || "Unknown Title";
-  const fileSize = (msg.document.file_size / (1024 * 1024)).toFixed(2) + " GB";
-
-  const exists = await Movie.findOne({ file_id: msg.document.file_id });
-  if (exists) return;
-
-  const newMovie = new Movie({
-    file_id: msg.document.file_id,
-    title,
-    caption: msg.caption || "",
-    file_size: fileSize
-  });
-
-  await newMovie.save();
+    const alreadyExists = await Movie.findOne({ file_id });
+    if (!alreadyExists) {
+      await Movie.create({ file_id, caption, title });
+      console.log("Movie indexed:", title);
+    }
+  }
 });
 
-// 🧠 Normalize text for better search
-function normalize(text) {
-  return text.replace(/[_\-\.]/g, " ").toLowerCase().trim();
-}
-
-// 🔍 Handle user search
+// Search functionality
 bot.on("text", async (ctx) => {
-  const query = normalize(ctx.message.text);
-  const movies = await Movie.find({
-    title: { $regex: new RegExp(query, "i") }
-  });
+  const searchQuery = ctx.message.text.toLowerCase().replace(/\s+/g, "_");
+  const results = await Movie.find({ title: { $regex: searchQuery } });
 
-  if (!movies.length) return ctx.reply("❌ Movie not found.");
+  if (results.length === 0) {
+    return ctx.reply("❌ No results found.");
+  }
 
-  ctx.session = ctx.session || {};
-  ctx.session[ctx.from.id] = { query, page: 0 };
-
-  return sendMoviePage(ctx, movies, 0);
+  ctx.session.results = results;
+  ctx.session.page = 0;
+  return sendResultsPage(ctx);
 });
 
-// 📤 Send a page of results
-async function sendMoviePage(ctx, movies, page) {
+// Send paginated result page
+async function sendResultsPage(ctx) {
+  const results = ctx.session.results || [];
+  const page = ctx.session.page || 0;
   const pageSize = 5;
+
   const start = page * pageSize;
   const end = start + pageSize;
-  const pageMovies = movies.slice(start, end);
+  const pageItems = results.slice(start, end);
 
-  const buttons = pageMovies.map(m =>
-    [Markup.button.callback(`${m.file_size} • ${m.title.slice(0, 40)}`, `send_${m._id}`)]
+  const buttons = pageItems.map(movie =>
+    [Markup.button.callback(movie.caption.slice(0, 60), `send_${movie.file_id}`)]
   );
 
-  if (movies.length > pageSize) {
-    buttons.push([
-      ...(page > 0 ? [Markup.button.callback("⬅ Prev", "prev")] : []),
-      ...(end < movies.length ? [Markup.button.callback("Next ➡", "next")] : [])
-    ]);
-  }
+  const navigationButtons = [];
+  if (start > 0) navigationButtons.push(Markup.button.callback("⬅️ Prev", "prev"));
+  if (end < results.length) navigationButtons.push(Markup.button.callback("Next ➡️", "next"));
+  if (navigationButtons.length) buttons.push(navigationButtons);
 
-  await ctx.reply("🎬 Select a movie:", Markup.inlineKeyboard(buttons));
+  await ctx.reply("🎬 Search Results:", Markup.inlineKeyboard(buttons));
 }
 
-// 🧾 Button handlers
-bot.on("callback_query", async (ctx) => {
-  const data = ctx.callbackQuery.data;
-
-  const userSession = ctx.session?.[ctx.from.id];
-  if (!userSession) return ctx.answerCbQuery("Session expired. Search again.");
-
-  const allMatches = await Movie.find({
-    title: { $regex: new RegExp(userSession.query, "i") }
-  });
-
-  if (data.startsWith("send_")) {
-    const movie = await Movie.findById(data.split("send_")[1]);
-    if (movie) {
-      await ctx.telegram.sendDocument(ctx.chat.id, movie.file_id, {
-        caption: movie.caption,
-        parse_mode: "HTML"
-      });
-    }
-    return ctx.answerCbQuery();
-  }
-
-  if (data === "next") {
-    userSession.page += 1;
-    return sendMoviePage(ctx, allMatches, userSession.page);
-  }
-
-  if (data === "prev") {
-    userSession.page -= 1;
-    return sendMoviePage(ctx, allMatches, userSession.page);
-  }
+// Pagination
+bot.action("next", async (ctx) => {
+  ctx.session.page++;
+  await ctx.deleteMessage();
+  return sendResultsPage(ctx);
 });
 
-bot.launch();
-console.log("🤖 Bot running...");
+bot.action("prev", async (ctx) => {
+  ctx.session.page--;
+  await ctx.deleteMessage();
+  return sendResultsPage(ctx);
+});
+
+// Send selected movie file
+bot.action(/^send_(.+)/, async (ctx) => {
+  const file_id = ctx.match[1];
+  const movie = await Movie.findOne({ file_id });
+  if (!movie) return ctx.reply("File not found or removed.");
+  await ctx.replyWithDocument(file_id, { caption: movie.caption });
+});
+
+// Launch bot
+bot.launch().then(() => console.log("Telegram bot started"));
