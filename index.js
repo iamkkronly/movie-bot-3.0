@@ -1,111 +1,93 @@
-const { Telegraf, Markup, session } = require("telegraf");
-const mongoose = require("mongoose");
-const express = require("express");
+const express = require('express');
+const { Telegraf } = require('telegraf');
+const mongoose = require('mongoose');
 
-// Constants (Directly included)
-const BOT_TOKEN = "";
-const MONGODB_URI = "mongodb+srv://gdfnj66:qonbOLu0Qxs0qLOw@cluster0.cr5ef04.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
-const CHANNEL_ID = -1002767614449;
-const PORT = 3000;
+// === Config ===
+const BOT_TOKEN = '7929567285:AAEZ6jjlShWNF2Uf16SI8tqA-R501jEIbmc';
+const MONGO_URI = 'mongodb+srv://gdfnj66:qonbOLu0Qxs0qLOw@cluster0.cr5ef04.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
+const SOURCE_CHANNEL = -1002767614449;
 
-// Initialize bot and session
-const bot = new Telegraf(BOT_TOKEN);
-bot.use(session());
+// === Connect to MongoDB ===
+mongoose.connect(MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+}).then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('❌ MongoDB error:', err));
 
-// Web server (for Render health check)
-const app = express();
-app.get("/", (_, res) => res.send("Bot is active"));
-app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
-
-// MongoDB schema
+// === Movie Schema ===
 const movieSchema = new mongoose.Schema({
   file_id: String,
+  title: String,
   caption: String,
-  title: String
+  search_key: String,
 });
-const Movie = mongoose.model("Movie", movieSchema);
+const Movie = mongoose.model('Movie', movieSchema);
 
-// Connect to MongoDB
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log("Connected to MongoDB"))
-  .catch((err) => console.error("MongoDB connection error:", err));
+// === Telegram Bot Setup ===
+const bot = new Telegraf(BOT_TOKEN);
 
-// Index new documents from the channel
-bot.on("message", async (ctx) => {
-  const msg = ctx.message;
-  if (msg.chat.id === CHANNEL_ID && msg.document) {
-    const file_id = msg.document.file_id;
-    const caption = msg.caption || "No caption";
-    const title = caption.toLowerCase().replace(/\s+/g, "_");
+// === Normalize Function ===
+const normalize = (text) =>
+  text.toLowerCase().replace(/[\s_]+/g, '').replace(/[^a-z0-9]/gi, '');
 
-    const exists = await Movie.findOne({ file_id });
+// === Index New Channel Posts ===
+bot.on('channel_post', async (ctx) => {
+  try {
+    const msg = ctx.channelPost;
+    const file = msg.document || msg.video;
+    if (!file) return;
+
+    const title = file.file_name || msg.caption?.split('\n')[0] || 'Untitled';
+    const caption = msg.caption || '';
+    const search_key = normalize(title);
+
+    const exists = await Movie.findOne({ file_id: file.file_id });
     if (!exists) {
-      await Movie.create({ file_id, caption, title });
-      console.log("Movie indexed:", title);
+      await Movie.create({
+        file_id: file.file_id,
+        title,
+        caption,
+        search_key,
+      });
+      console.log(`📥 Indexed: ${title}`);
     }
+  } catch (err) {
+    console.error('❌ Indexing error:', err.message);
   }
 });
 
-// Search handler
-bot.on("text", async (ctx) => {
-  const searchQuery = ctx.message.text.toLowerCase().replace(/\s+/g, "_");
-  const results = await Movie.find({ title: { $regex: searchQuery } });
+// === Respond to User Messages ===
+bot.on('text', async (ctx) => {
+  try {
+    const query = normalize(ctx.message.text);
+    const movie = await Movie.findOne({ search_key: query });
 
-  if (results.length === 0) {
-    return ctx.reply("❌ No results found.");
+    if (movie) {
+      await ctx.telegram.sendDocument(ctx.chat.id, movie.file_id, {
+        caption: movie.caption,
+        parse_mode: 'HTML',
+      });
+    } else {
+      await ctx.reply('❌ Movie not found. Try a different name.');
+    }
+  } catch (err) {
+    console.error('❌ Search error:', err.message);
+    ctx.reply('⚠️ Internal server error.');
   }
-
-  ctx.session.results = results;
-  ctx.session.page = 0;
-  return sendResultsPage(ctx);
 });
 
-// Paginated response
-async function sendResultsPage(ctx) {
-  const results = ctx.session.results || [];
-  const page = ctx.session.page || 0;
-  const pageSize = 5;
+// === Launch the Bot ===
+bot.launch();
+console.log('🤖 Bot started');
 
-  const start = page * pageSize;
-  const end = start + pageSize;
-  const pageItems = results.slice(start, end);
+// === Express App for Render ===
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-  const buttons = pageItems.map(movie =>
-    [Markup.button.callback(movie.caption.slice(0, 60), `send_${movie.file_id}`)]
-  );
-
-  const navigationButtons = [];
-  if (start > 0) navigationButtons.push(Markup.button.callback("⬅️ Prev", "prev"));
-  if (end < results.length) navigationButtons.push(Markup.button.callback("Next ➡️", "next"));
-  if (navigationButtons.length) buttons.push(navigationButtons);
-
-  await ctx.reply("🎬 Search Results:", Markup.inlineKeyboard(buttons));
-}
-
-// Pagination controls
-bot.action("next", async (ctx) => {
-  ctx.session.page++;
-  await ctx.deleteMessage();
-  return sendResultsPage(ctx);
+app.get('/', (req, res) => {
+  res.send('🎬 Telegram Movie Bot is running.');
 });
 
-bot.action("prev", async (ctx) => {
-  ctx.session.page--;
-  await ctx.deleteMessage();
-  return sendResultsPage(ctx);
+app.listen(PORT, () => {
+  console.log(`🌐 Server is running on port ${PORT}`);
 });
-
-// Send selected file
-bot.action(/^send_(.+)/, async (ctx) => {
-  const file_id = ctx.match[1];
-  const movie = await Movie.findOne({ file_id });
-  if (!movie) return ctx.reply("File not found or removed.");
-  await ctx.replyWithDocument(file_id, { caption: movie.caption });
-});
-
-// Graceful shutdown (prevent 409 Conflict)
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
-
-// Launch bot (long polling)
-bot.launch().then(() => console.log("Telegram bot started"));
